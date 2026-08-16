@@ -71,7 +71,8 @@
 <script>
 let pc, localStream;
 const $ = id => document.getElementById(id);
-const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+// Eerste test: alleen directe WebRTC-kandidaten, zonder externe STUN/TURN-server.
+const config = { iceServers: [] };
 
 function show(role){
   $('home').classList.add('hidden');
