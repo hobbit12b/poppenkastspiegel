@@ -11,14 +11,13 @@
     h1{margin:0 0 8px;font-size:clamp(30px,6vw,48px)} p{line-height:1.45}.muted{color:#6b7280}
     .card{background:#fff;border-radius:20px;padding:20px;margin:16px 0;box-shadow:0 8px 28px rgba(0,0,0,.08)}
     button{width:100%;border:0;border-radius:14px;padding:16px 18px;font-size:18px;font-weight:700;margin:7px 0;background:#111827;color:#fff}
-    button.secondary{background:#e5e7eb;color:#111827} button.danger{background:#b91c1c}
-    textarea{width:100%;min-height:135px;padding:12px;border:1px solid #d1d5db;border-radius:12px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
-    label{display:block;font-weight:700;margin:14px 0 7px}.hidden{display:none!important}
-    video{width:100%;background:#111827;border-radius:16px;max-height:60vh;object-fit:contain}
+    button.secondary{background:#e5e7eb;color:#111827} button.danger{background:#b91c1c}.hidden{display:none!important}
+    video{width:100%;background:#111827;border-radius:16px;max-height:62vh;object-fit:contain}
     .status{display:inline-block;padding:7px 10px;border-radius:999px;background:#e5e7eb;font-weight:700;font-size:14px}
-    .live{background:#fee2e2;color:#991b1b}.ok{background:#dcfce7;color:#166534}
-    .notice{font-size:14px;background:#eff6ff;padding:12px;border-radius:12px}
-    .copyStatus{min-height:24px;margin:6px 0 10px;font-weight:700;font-size:14px;color:#166534}
+    .live{background:#fee2e2;color:#991b1b}.ok{background:#dcfce7;color:#166534}.warn{background:#fef3c7;color:#92400e}
+    .notice{font-size:14px;background:#eff6ff;padding:12px;border-radius:12px}.qrWrap{text-align:center;margin:18px 0}
+    #qr{display:inline-block;background:white;padding:14px;border-radius:14px}.big{font-size:20px;font-weight:750}.center{text-align:center}
+    .small{font-size:13px}.spinner{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
@@ -37,156 +36,126 @@
     <h2>Camera-iPad</h2>
     <div class="notice">Zet deze iPad zichtbaar achter in de klas. De microfoon wordt niet aangevraagd.</div>
     <video id="localVideo" autoplay playsinline muted></video>
-    <button id="startCamera">Start livebeeld</button>
-    <div id="offerArea" class="hidden">
-      <label>1. Startcode — kopieer deze naar de kijk-iPad</label>
-      <textarea id="offerOut" readonly></textarea>
-      <button id="copyOffer" class="secondary">📋 Kopieer startcode</button>
-      <div id="offerCopyStatus" class="copyStatus"></div>
-      <label>2. Plak daarna de antwoordcode van de kijk-iPad</label>
-      <textarea id="answerIn" placeholder="Plak antwoordcode hier"></textarea>
-      <button id="applyAnswer">Maak verbinding</button>
+    <button id="startCamera">Start camera en maak QR</button>
+    <div id="pairArea" class="hidden">
+      <div class="qrWrap"><div id="qr"></div></div>
+      <p class="big center">Scan deze QR met de andere iPad</p>
+      <p id="pairState" class="muted center">Wachten op kijk-iPad…</p>
     </div>
-    <button id="stopCamera" class="danger hidden">Stop camera</button>
+    <button id="stopCamera" class="danger hidden">Stop livebeeld</button>
   </section>
 
   <section id="viewerPanel" class="card hidden">
     <span id="viewerStatus" class="status">Niet verbonden</span>
     <h2>Kijk-iPad</h2>
-    <label>1. Plak de startcode van de camera-iPad</label>
-    <textarea id="offerIn" placeholder="Plak startcode hier"></textarea>
-    <button id="makeAnswer">Maak antwoordcode</button>
-    <div id="answerArea" class="hidden">
-      <label>2. Kopieer deze antwoordcode terug naar de camera-iPad</label>
-      <textarea id="answerOut" readonly></textarea>
-      <button id="copyAnswer" class="secondary">📋 Kopieer antwoordcode</button>
-      <div id="answerCopyStatus" class="copyStatus"></div>
-    </div>
+    <p id="viewerInfo" class="muted">Scan de QR op de camera-iPad met de Camera-app van deze iPad.</p>
     <video id="remoteVideo" autoplay playsinline></video>
     <button id="stopViewer" class="danger hidden">Stop kijken</button>
   </section>
 
+  <section id="setupPanel" class="card hidden">
+    <span class="status warn">Eenmalige installatie nodig</span>
+    <h2>QR-koppeling is voorbereid</h2>
+    <p>De website is klaar voor automatisch koppelen, maar de eigen signalingservice heeft nog geen webadres.</p>
+    <p class="muted small">Zodra die service is gedeployed, hoeft in <code>signal-config.js</code> alleen het adres te worden ingevuld. Er worden geen videobeelden naar die service gestuurd.</p>
+  </section>
+
   <section class="card">
-    <strong>Privacy bij deze test</strong>
-    <p class="muted">De pagina gebruikt geen analytics, cookies, accounts of opslag. Er is geen opnamefunctie. De browser kan zelf nog wel screenshots of schermopname maken; dat kan een website niet volledig blokkeren.</p>
+    <strong>Privacy</strong>
+    <p class="muted">Geen microfoon, analytics, accounts of video-opslag. De QR bevat een willekeurige tijdelijke sessiesleutel in het URL-fragment; dat fragment wordt niet naar GitHub Pages gestuurd. Per sessie is maximaal één kijker toegestaan.</p>
   </section>
 </main>
+<script src="signal-config.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" referrerpolicy="no-referrer"></script>
 <script>
-let pc, localStream;
-const $ = id => document.getElementById(id);
-const config = { iceServers: [] };
+let pc=null, localStream=null, ws=null, role=null;
+const $=id=>document.getElementById(id);
+const SIGNAL_URL=(window.POPPENKAST_SIGNAL_URL||'').replace(/\/$/,'');
+const rtcConfig={iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]};
 
-function show(role){
-  $('home').classList.add('hidden');
-  $(role+'Panel').classList.remove('hidden');
-}
-$('cameraRole').onclick=()=>show('camera');
-$('viewerRole').onclick=()=>show('viewer');
+function randB64(bytes){const a=new Uint8Array(bytes);crypto.getRandomValues(a);return btoa(String.fromCharCode(...a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+function parseHash(){const p=new URLSearchParams(location.hash.slice(1));return {session:p.get('join'),key:p.get('key')};}
+function show(id){['home','cameraPanel','viewerPanel'].forEach(x=>$(x).classList.add('hidden'));$(id).classList.remove('hidden');}
+function setupMissing(){ $('setupPanel').classList.remove('hidden'); }
+function wsBase(){return SIGNAL_URL.replace(/^https:/,'wss:').replace(/^http:/,'ws:');}
 
-function makePC(){
-  const p = new RTCPeerConnection(config);
+function makePC(which){
+  const p=new RTCPeerConnection(rtcConfig);
+  p.onicecandidate=e=>{if(e.candidate&&ws?.readyState===WebSocket.OPEN) send({type:'ice',candidate:e.candidate});};
   p.onconnectionstatechange=()=>{
     const s=p.connectionState;
-    if($('cameraPanel').classList.contains('hidden')){
-      $('viewerStatus').textContent=s==='connected'?'Verbonden':'Status: '+s;
-      $('viewerStatus').className='status '+(s==='connected'?'ok':'');
-    } else {
+    if(which==='camera'){
       $('cameraStatus').textContent=s==='connected'?'🔴 LIVE verbonden':'🔴 Camera actief · '+s;
       $('cameraStatus').className='status live';
+      if(s==='connected'){$('pairState').textContent='✓ Kijk-iPad verbonden';$('qr').classList.add('hidden');}
+    }else{
+      $('viewerStatus').textContent=s==='connected'?'🟢 Verbonden':'Status: '+s;
+      $('viewerStatus').className='status '+(s==='connected'?'ok':'');
     }
   };
   return p;
 }
-function waitIce(p){
-  if(p.iceGatheringState==='complete') return Promise.resolve();
-  return new Promise(resolve=>{
-    const f=()=>{if(p.iceGatheringState==='complete'){p.removeEventListener('icegatheringstatechange',f);resolve();}};
-    p.addEventListener('icegatheringstatechange',f);
-    setTimeout(resolve,5000);
+function send(obj){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj));}
+
+function openSignal(session,key,which){
+  return new Promise((resolve,reject)=>{
+    if(!SIGNAL_URL){setupMissing();reject(new Error('Signalingservice nog niet gekoppeld'));return;}
+    ws=new WebSocket(`${wsBase()}/ws/${encodeURIComponent(session)}?role=${which}`);
+    ws.onopen=()=>{send({type:'hello',key});resolve();};
+    ws.onerror=()=>reject(new Error('Signalingservice niet bereikbaar'));
+    ws.onmessage=async ev=>{
+      let m;try{m=JSON.parse(ev.data);}catch{return;}
+      if(m.type==='error'){alert(m.message||'Koppelen mislukt');return;}
+      if(which==='camera'&&m.type==='viewer-ready'){
+        const offer=await pc.createOffer();await pc.setLocalDescription(offer);send({type:'offer',sdp:pc.localDescription});
+      }else if(which==='camera'&&m.type==='answer'){
+        await pc.setRemoteDescription(m.sdp);
+      }else if(which==='viewer'&&m.type==='offer'){
+        await pc.setRemoteDescription(m.sdp);const answer=await pc.createAnswer();await pc.setLocalDescription(answer);send({type:'answer',sdp:pc.localDescription});
+      }else if(m.type==='ice'&&m.candidate){
+        try{await pc.addIceCandidate(m.candidate);}catch(e){console.warn(e);}
+      }
+    };
   });
 }
-function encode(desc){return btoa(unescape(encodeURIComponent(JSON.stringify(desc))));}
-function decode(s){return JSON.parse(decodeURIComponent(escape(atob(s.trim()))));}
 
-async function copyText(id, statusId){
-  const el=$(id);
-  const status=$(statusId);
-  const value=el.value;
-  if(!value){status.textContent='Er is nog geen code om te kopiëren.'; return;}
-
-  try{
-    if(navigator.clipboard && window.isSecureContext){
-      await navigator.clipboard.writeText(value);
-      status.textContent='✓ Code gekopieerd';
-      return;
-    }
-  }catch(e){}
-
-  try{
-    el.removeAttribute('readonly');
-    el.focus();
-    el.select();
-    el.setSelectionRange(0, value.length);
-    const ok=document.execCommand('copy');
-    el.setAttribute('readonly','');
-    if(ok){
-      status.textContent='✓ Code gekopieerd';
-      el.blur();
-      return;
-    }
-  }catch(e){}
-
-  el.removeAttribute('readonly');
-  el.focus();
-  el.select();
-  el.setSelectionRange(0, value.length);
-  el.setAttribute('readonly','');
-  status.textContent='Code geselecteerd — kies nu “Kopieer” in het iPad-menu.';
-}
+$('cameraRole').onclick=()=>{role='camera';show('cameraPanel');};
+$('viewerRole').onclick=()=>{role='viewer';show('viewerPanel');};
 
 $('startCamera').onclick=async()=>{
   try{
-    localStream=await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:'user',width:{ideal:960},height:{ideal:540},frameRate:{ideal:12,max:15}},
-      audio:false
-    });
+    localStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:960},height:{ideal:540},frameRate:{ideal:12,max:15}},audio:false});
     $('localVideo').srcObject=localStream;
-    pc=makePC();
-    localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-    const offer=await pc.createOffer();
-    await pc.setLocalDescription(offer); await waitIce(pc);
-    $('offerOut').value=encode(pc.localDescription);
-    $('offerArea').classList.remove('hidden'); $('stopCamera').classList.remove('hidden');
-    $('startCamera').classList.add('hidden'); $('cameraStatus').textContent='🔴 Camera actief · nog niet gekoppeld'; $('cameraStatus').className='status live';
-  }catch(e){alert('Camera kon niet starten: '+e.message);}
-};
-$('copyOffer').onclick=()=>copyText('offerOut','offerCopyStatus');
-$('offerOut').onclick=()=>{$('offerOut').select();$('offerOut').setSelectionRange(0,$('offerOut').value.length);};
-$('applyAnswer').onclick=async()=>{
-  try{await pc.setRemoteDescription(decode($('answerIn').value));}
-  catch(e){alert('Deze antwoordcode is niet geldig: '+e.message);}
+    pc=makePC('camera');localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+    const session=randB64(12), key=randB64(24);
+    const joinUrl=`${location.origin}${location.pathname}#join=${session}&key=${key}`;
+    $('qr').innerHTML='';new QRCode($('qr'),{text:joinUrl,width:240,height:240,correctLevel:QRCode.CorrectLevel.M});
+    $('pairArea').classList.remove('hidden');$('stopCamera').classList.remove('hidden');$('startCamera').classList.add('hidden');
+    $('cameraStatus').textContent='🔴 Camera actief · wachten op koppeling';$('cameraStatus').className='status live';
+    await openSignal(session,key,'camera');
+  }catch(e){if(localStream)stopAll();if(e.name!=='NotAllowedError'&&!String(e.message).includes('Signaling')) alert('Camera kon niet starten: '+e.message);}
 };
 
-$('makeAnswer').onclick=async()=>{
+async function startViewer(session,key){
+  role='viewer';show('viewerPanel');$('viewerInfo').innerHTML='<span class="spinner">↻</span> Verbinden met camera…';
   try{
-    pc=makePC();
-    pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];};
-    await pc.setRemoteDescription(decode($('offerIn').value));
-    const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); await waitIce(pc);
-    $('answerOut').value=encode(pc.localDescription); $('answerArea').classList.remove('hidden'); $('stopViewer').classList.remove('hidden');
-  }catch(e){alert('Deze startcode is niet geldig: '+e.message);}
-};
-$('copyAnswer').onclick=()=>copyText('answerOut','answerCopyStatus');
-$('answerOut').onclick=()=>{$('answerOut').select();$('answerOut').setSelectionRange(0,$('answerOut').value.length);};
+    pc=makePC('viewer');pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];};
+    await openSignal(session,key,'viewer');
+    $('viewerInfo').textContent='Wachten op livebeeld…';$('stopViewer').classList.remove('hidden');
+  }catch(e){$('viewerInfo').textContent=e.message;}
+}
 
 function stopAll(){
-  if(localStream){localStream.getTracks().forEach(t=>t.stop()); localStream=null;}
-  if(pc){pc.close();pc=null;}
-  $('localVideo').srcObject=null; $('remoteVideo').srcObject=null;
+  try{send({type:'bye'});}catch{}
+  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+  if(pc){pc.close();pc=null;}if(ws){ws.close();ws=null;}
+  $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
 }
-$('stopCamera').onclick=()=>{stopAll();location.reload();};
-$('stopViewer').onclick=()=>{stopAll();location.reload();};
+$('stopCamera').onclick=()=>{stopAll();location.hash='';location.reload();};
+$('stopViewer').onclick=()=>{stopAll();location.hash='';location.reload();};
 window.addEventListener('pagehide',stopAll);
+
+const h=parseHash();if(h.session&&h.key)startViewer(h.session,h.key);
 </script>
 </body>
 </html>
