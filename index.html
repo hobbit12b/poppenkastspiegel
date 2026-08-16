@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <title>Poppenkastspiegel</title>
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#f3f4f6}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh} main{max-width:760px;margin:auto;padding:24px}
+    h1{margin:0 0 8px;font-size:clamp(30px,6vw,48px)} p{line-height:1.45}.muted{color:#6b7280}
+    .card{background:#fff;border-radius:20px;padding:20px;margin:16px 0;box-shadow:0 8px 28px rgba(0,0,0,.08)}
+    button{width:100%;border:0;border-radius:14px;padding:16px 18px;font-size:18px;font-weight:700;margin:7px 0;background:#111827;color:#fff}
+    button.secondary{background:#e5e7eb;color:#111827} button.danger{background:#b91c1c}
+    textarea{width:100%;min-height:135px;padding:12px;border:1px solid #d1d5db;border-radius:12px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+    label{display:block;font-weight:700;margin:14px 0 7px}.hidden{display:none!important}
+    video{width:100%;background:#111827;border-radius:16px;max-height:60vh;object-fit:contain}
+    .status{display:inline-block;padding:7px 10px;border-radius:999px;background:#e5e7eb;font-weight:700;font-size:14px}
+    .live{background:#fee2e2;color:#991b1b}.ok{background:#dcfce7;color:#166534}
+    .notice{font-size:14px;background:#eff6ff;padding:12px;border-radius:12px}
+  </style>
+</head>
+<body>
+<main>
+  <h1>🎭 Poppenkastspiegel</h1>
+  <p class="muted">Alleen livebeeld. Geen geluid. Geen opname door deze website.</p>
+
+  <section id="home" class="card">
+    <h2>Wat doet deze iPad?</h2>
+    <button id="cameraRole">📷 Deze iPad is de camera</button>
+    <button id="viewerRole" class="secondary">👀 Op deze iPad wil ik kijken</button>
+  </section>
+
+  <section id="cameraPanel" class="card hidden">
+    <span id="cameraStatus" class="status">Camera uit</span>
+    <h2>Camera-iPad</h2>
+    <div class="notice">Zet deze iPad zichtbaar achter in de klas. De microfoon wordt niet aangevraagd.</div>
+    <video id="localVideo" autoplay playsinline muted></video>
+    <button id="startCamera">Start livebeeld</button>
+    <div id="offerArea" class="hidden">
+      <label>1. Startcode — kopieer deze naar de kijk-iPad</label>
+      <textarea id="offerOut" readonly></textarea>
+      <button id="copyOffer" class="secondary">Kopieer startcode</button>
+      <label>2. Plak daarna de antwoordcode van de kijk-iPad</label>
+      <textarea id="answerIn" placeholder="Plak antwoordcode hier"></textarea>
+      <button id="applyAnswer">Maak verbinding</button>
+    </div>
+    <button id="stopCamera" class="danger hidden">Stop camera</button>
+  </section>
+
+  <section id="viewerPanel" class="card hidden">
+    <span id="viewerStatus" class="status">Niet verbonden</span>
+    <h2>Kijk-iPad</h2>
+    <label>1. Plak de startcode van de camera-iPad</label>
+    <textarea id="offerIn" placeholder="Plak startcode hier"></textarea>
+    <button id="makeAnswer">Maak antwoordcode</button>
+    <div id="answerArea" class="hidden">
+      <label>2. Kopieer deze antwoordcode terug naar de camera-iPad</label>
+      <textarea id="answerOut" readonly></textarea>
+      <button id="copyAnswer" class="secondary">Kopieer antwoordcode</button>
+    </div>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <button id="stopViewer" class="danger hidden">Stop kijken</button>
+  </section>
+
+  <section class="card">
+    <strong>Privacy bij deze test</strong>
+    <p class="muted">De pagina gebruikt geen analytics, cookies, accounts of opslag. Er is geen opnamefunctie. De browser kan zelf nog wel screenshots of schermopname maken; dat kan een website niet volledig blokkeren.</p>
+  </section>
+</main>
+<script>
+let pc, localStream;
+const $ = id => document.getElementById(id);
+const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+function show(role){
+  $('home').classList.add('hidden');
+  $(role+'Panel').classList.remove('hidden');
+}
+$('cameraRole').onclick=()=>show('camera');
+$('viewerRole').onclick=()=>show('viewer');
+
+function makePC(){
+  const p = new RTCPeerConnection(config);
+  p.onconnectionstatechange=()=>{
+    const s=p.connectionState;
+    if($('cameraPanel').classList.contains('hidden')){
+      $('viewerStatus').textContent=s==='connected'?'Verbonden':'Status: '+s;
+      $('viewerStatus').className='status '+(s==='connected'?'ok':'');
+    } else {
+      $('cameraStatus').textContent=s==='connected'?'🔴 LIVE verbonden':'🔴 Camera actief · '+s;
+      $('cameraStatus').className='status live';
+    }
+  };
+  return p;
+}
+function waitIce(p){
+  if(p.iceGatheringState==='complete') return Promise.resolve();
+  return new Promise(resolve=>{
+    const f=()=>{if(p.iceGatheringState==='complete'){p.removeEventListener('icegatheringstatechange',f);resolve();}};
+    p.addEventListener('icegatheringstatechange',f);
+    setTimeout(resolve,5000);
+  });
+}
+function encode(desc){return btoa(unescape(encodeURIComponent(JSON.stringify(desc))));}
+function decode(s){return JSON.parse(decodeURIComponent(escape(atob(s.trim()))));}
+async function copyText(id){
+  const el=$(id); el.select(); el.setSelectionRange(0,999999);
+  try{await navigator.clipboard.writeText(el.value);}catch{document.execCommand('copy');}
+}
+
+$('startCamera').onclick=async()=>{
+  try{
+    localStream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'user',width:{ideal:960},height:{ideal:540},frameRate:{ideal:12,max:15}},
+      audio:false
+    });
+    $('localVideo').srcObject=localStream;
+    pc=makePC();
+    localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+    const offer=await pc.createOffer();
+    await pc.setLocalDescription(offer); await waitIce(pc);
+    $('offerOut').value=encode(pc.localDescription);
+    $('offerArea').classList.remove('hidden'); $('stopCamera').classList.remove('hidden');
+    $('startCamera').classList.add('hidden'); $('cameraStatus').textContent='🔴 Camera actief · nog niet gekoppeld'; $('cameraStatus').className='status live';
+  }catch(e){alert('Camera kon niet starten: '+e.message);}
+};
+$('copyOffer').onclick=()=>copyText('offerOut');
+$('applyAnswer').onclick=async()=>{
+  try{await pc.setRemoteDescription(decode($('answerIn').value));}
+  catch(e){alert('Deze antwoordcode is niet geldig: '+e.message);}
+};
+
+$('makeAnswer').onclick=async()=>{
+  try{
+    pc=makePC();
+    pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];};
+    await pc.setRemoteDescription(decode($('offerIn').value));
+    const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); await waitIce(pc);
+    $('answerOut').value=encode(pc.localDescription); $('answerArea').classList.remove('hidden'); $('stopViewer').classList.remove('hidden');
+  }catch(e){alert('Deze startcode is niet geldig: '+e.message);}
+};
+$('copyAnswer').onclick=()=>copyText('answerOut');
+
+function stopAll(){
+  if(localStream){localStream.getTracks().forEach(t=>t.stop()); localStream=null;}
+  if(pc){pc.close();pc=null;}
+  $('localVideo').srcObject=null; $('remoteVideo').srcObject=null;
+}
+$('stopCamera').onclick=()=>{stopAll();location.reload();};
+$('stopViewer').onclick=()=>{stopAll();location.reload();};
+window.addEventListener('pagehide',stopAll);
+</script>
+</body>
+</html>
