@@ -18,6 +18,7 @@
     .status{display:inline-block;padding:7px 10px;border-radius:999px;background:#e5e7eb;font-weight:700;font-size:14px}
     .live{background:#fee2e2;color:#991b1b}.ok{background:#dcfce7;color:#166534}
     .notice{font-size:14px;background:#eff6ff;padding:12px;border-radius:12px}
+    .copyStatus{min-height:24px;margin:6px 0 10px;font-weight:700;font-size:14px;color:#166534}
   </style>
 </head>
 <body>
@@ -40,7 +41,8 @@
     <div id="offerArea" class="hidden">
       <label>1. Startcode — kopieer deze naar de kijk-iPad</label>
       <textarea id="offerOut" readonly></textarea>
-      <button id="copyOffer" class="secondary">Kopieer startcode</button>
+      <button id="copyOffer" class="secondary">📋 Kopieer startcode</button>
+      <div id="offerCopyStatus" class="copyStatus"></div>
       <label>2. Plak daarna de antwoordcode van de kijk-iPad</label>
       <textarea id="answerIn" placeholder="Plak antwoordcode hier"></textarea>
       <button id="applyAnswer">Maak verbinding</button>
@@ -57,7 +59,8 @@
     <div id="answerArea" class="hidden">
       <label>2. Kopieer deze antwoordcode terug naar de camera-iPad</label>
       <textarea id="answerOut" readonly></textarea>
-      <button id="copyAnswer" class="secondary">Kopieer antwoordcode</button>
+      <button id="copyAnswer" class="secondary">📋 Kopieer antwoordcode</button>
+      <div id="answerCopyStatus" class="copyStatus"></div>
     </div>
     <video id="remoteVideo" autoplay playsinline></video>
     <button id="stopViewer" class="danger hidden">Stop kijken</button>
@@ -71,7 +74,6 @@
 <script>
 let pc, localStream;
 const $ = id => document.getElementById(id);
-// Eerste test: alleen directe WebRTC-kandidaten, zonder externe STUN/TURN-server.
 const config = { iceServers: [] };
 
 function show(role){
@@ -105,9 +107,41 @@ function waitIce(p){
 }
 function encode(desc){return btoa(unescape(encodeURIComponent(JSON.stringify(desc))));}
 function decode(s){return JSON.parse(decodeURIComponent(escape(atob(s.trim()))));}
-async function copyText(id){
-  const el=$(id); el.select(); el.setSelectionRange(0,999999);
-  try{await navigator.clipboard.writeText(el.value);}catch{document.execCommand('copy');}
+
+async function copyText(id, statusId){
+  const el=$(id);
+  const status=$(statusId);
+  const value=el.value;
+  if(!value){status.textContent='Er is nog geen code om te kopiëren.'; return;}
+
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(value);
+      status.textContent='✓ Code gekopieerd';
+      return;
+    }
+  }catch(e){}
+
+  try{
+    el.removeAttribute('readonly');
+    el.focus();
+    el.select();
+    el.setSelectionRange(0, value.length);
+    const ok=document.execCommand('copy');
+    el.setAttribute('readonly','');
+    if(ok){
+      status.textContent='✓ Code gekopieerd';
+      el.blur();
+      return;
+    }
+  }catch(e){}
+
+  el.removeAttribute('readonly');
+  el.focus();
+  el.select();
+  el.setSelectionRange(0, value.length);
+  el.setAttribute('readonly','');
+  status.textContent='Code geselecteerd — kies nu “Kopieer” in het iPad-menu.';
 }
 
 $('startCamera').onclick=async()=>{
@@ -126,7 +160,8 @@ $('startCamera').onclick=async()=>{
     $('startCamera').classList.add('hidden'); $('cameraStatus').textContent='🔴 Camera actief · nog niet gekoppeld'; $('cameraStatus').className='status live';
   }catch(e){alert('Camera kon niet starten: '+e.message);}
 };
-$('copyOffer').onclick=()=>copyText('offerOut');
+$('copyOffer').onclick=()=>copyText('offerOut','offerCopyStatus');
+$('offerOut').onclick=()=>{$('offerOut').select();$('offerOut').setSelectionRange(0,$('offerOut').value.length);};
 $('applyAnswer').onclick=async()=>{
   try{await pc.setRemoteDescription(decode($('answerIn').value));}
   catch(e){alert('Deze antwoordcode is niet geldig: '+e.message);}
@@ -141,7 +176,8 @@ $('makeAnswer').onclick=async()=>{
     $('answerOut').value=encode(pc.localDescription); $('answerArea').classList.remove('hidden'); $('stopViewer').classList.remove('hidden');
   }catch(e){alert('Deze startcode is niet geldig: '+e.message);}
 };
-$('copyAnswer').onclick=()=>copyText('answerOut');
+$('copyAnswer').onclick=()=>copyText('answerOut','answerCopyStatus');
+$('answerOut').onclick=()=>{$('answerOut').select();$('answerOut').setSelectionRange(0,$('answerOut').value.length);};
 
 function stopAll(){
   if(localStream){localStream.getTracks().forEach(t=>t.stop()); localStream=null;}
