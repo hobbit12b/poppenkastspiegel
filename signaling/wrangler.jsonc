@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "poppenkast-signaling",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-16",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "SessionRoom"
+      }
+    ]
+  },
+  "exports": {
+    "SessionRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "observability": {
+    "enabled": false
+  }
+}
