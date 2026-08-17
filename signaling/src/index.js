@@ -48,6 +48,15 @@ export class SessionRoom extends DurableObject {
     const url = new URL(request.url);
     const role = url.searchParams.get('role');
     if (role !== 'camera' && role !== 'viewer') return jsonError('Invalid role');
+
+    const sessionClosed = await this.ctx.storage.get('sessionClosed');
+    if (sessionClosed) return jsonError('Deze sessie is afgesloten. Maak een nieuwe QR.', 410);
+
+    if (role === 'viewer') {
+      const viewerUsed = await this.ctx.storage.get('viewerUsed');
+      if (viewerUsed) return jsonError('Deze sessie heeft al een kijker gehad. Maak een nieuwe QR.', 410);
+    }
+
     if (this.peers[role]) return jsonError(role === 'viewer' ? 'Deze sessie heeft al een kijker.' : 'Camera is al verbonden.', 409);
 
     const pair = new WebSocketPair();
@@ -81,6 +90,10 @@ export class SessionRoom extends DurableObject {
       let expected = await this.ctx.storage.get('secretHash');
 
       if (role === 'camera') {
+        if (await this.ctx.storage.get('sessionClosed')) {
+          socket.close(1008, 'Session closed');
+          return;
+        }
         if (!expected) {
           await this.ctx.storage.put('secretHash', presented);
           expected = presented;
@@ -95,11 +108,18 @@ export class SessionRoom extends DurableObject {
         return;
       }
 
+      if (await this.ctx.storage.get('viewerUsed')) {
+        socket.close(1008, 'Viewer already used');
+        return;
+      }
       if (!expected || presented !== expected || !this.peers.camera || !this.authenticated.has(this.peers.camera)) {
         socket.close(1008, 'Session not available');
         return;
       }
 
+      // Vanaf dit moment is deze sessie voorgoed aan deze ene kijkverbinding besteed.
+      // Een tweede kijker of herverbinding met dezelfde QR wordt server-side geweigerd.
+      await this.ctx.storage.put('viewerUsed', true);
       this.authenticated.add(socket);
       await this.ctx.storage.setAlarm(Date.now() + THIRTY_MIN);
       this.safeSend(socket, { type: 'ready' });
@@ -127,13 +147,24 @@ export class SessionRoom extends DurableObject {
   }
 
   onClose(socket, role) {
-    if (this.peers[role] === socket) this.peers[role] = null;
+    if (this.peers[role] !== socket) return;
+    this.peers[role] = null;
+
     const otherRole = role === 'camera' ? 'viewer' : 'camera';
     const other = this.peers[otherRole];
     if (other) {
       try { other.close(1000, 'Other device disconnected'); } catch {}
       this.peers[otherRole] = null;
     }
+
+    // Zodra de eerste kijker eenmaal is toegelaten en een van beide apparaten
+    // wegvalt/stopt, wordt de sessie definitief gesloten. Geen reconnect-venster.
+    this.ctx.waitUntil((async () => {
+      if (await this.ctx.storage.get('viewerUsed')) {
+        await this.ctx.storage.put('sessionClosed', true);
+        await this.ctx.storage.delete('secretHash');
+      }
+    })());
   }
 
   async alarm() {
