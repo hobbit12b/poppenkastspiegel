@@ -39,7 +39,7 @@
     <button id="startCamera">Start camera en maak QR</button>
     <div id="pairArea" class="hidden">
       <div class="qrWrap"><div id="qr"></div></div>
-      <p class="big center">Scan deze QR met de andere iPad</p>
+      <p id="scanInstruction" class="big center">Scan deze QR met de andere iPad</p>
       <p id="pairState" class="muted center">Wachten op kijk-iPad…</p>
     </div>
     <button id="stopCamera" class="danger hidden">Stop livebeeld</button>
@@ -55,7 +55,7 @@
 
   <section class="card">
     <strong>Privacy</strong>
-    <p class="muted">Geen microfoon, analytics, accounts of video-opslag. De QR bevat een willekeurige tijdelijke sessiesleutel in het URL-fragment; dat fragment wordt niet naar GitHub Pages gestuurd. Per sessie is maximaal één kijker toegestaan. Er wordt geen betaalde TURN-dienst gebruikt.</p>
+    <p class="muted">Geen microfoon, analytics, accounts of video-opslag. De QR bevat een willekeurige tijdelijke sessiesleutel in het URL-fragment; dat fragment wordt niet naar GitHub Pages gestuurd. Per sessie is maximaal één kijker toegestaan.</p>
   </section>
 </main>
 <script src="signal-config.js"></script>
@@ -81,7 +81,11 @@ function makePC(which){
     if(which==='camera'){
       $('cameraStatus').textContent=s==='connected'?'🔴 LIVE verbonden':'🔴 Camera actief · '+s;
       $('cameraStatus').className='status live';
-      if(s==='connected'){$('pairState').textContent='✓ Kijk-iPad verbonden';$('qr').classList.add('hidden');}
+      if(s==='connected'){
+        $('pairState').textContent='✓ Kijk-iPad verbonden';
+        $('qr').classList.add('hidden');
+        $('scanInstruction').classList.add('hidden');
+      }
       if(s==='failed')$('pairState').textContent='Verbinding mislukt. Stop en maak een nieuwe QR.';
     }else{
       $('viewerStatus').textContent=s==='connected'?'🟢 Verbonden':'Status: '+s;
