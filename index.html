@@ -7,17 +7,17 @@
   <title>Poppenkastspiegel</title>
   <style>
     :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#f3f4f6}
-    *{box-sizing:border-box} body{margin:0;min-height:100vh} main{max-width:760px;margin:auto;padding:24px}
-    h1{margin:0 0 8px;font-size:clamp(30px,6vw,48px)} p{line-height:1.45}.muted{color:#6b7280}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh}main{max-width:760px;margin:auto;padding:24px}
+    h1{margin:0 0 8px;font-size:clamp(30px,6vw,48px)}p{line-height:1.45}.muted{color:#6b7280}.small{font-size:13px}
     .card{background:#fff;border-radius:20px;padding:20px;margin:16px 0;box-shadow:0 8px 28px rgba(0,0,0,.08)}
     button{width:100%;border:0;border-radius:14px;padding:16px 18px;font-size:18px;font-weight:700;margin:7px 0;background:#111827;color:#fff}
-    button.secondary{background:#e5e7eb;color:#111827} button.danger{background:#b91c1c}.hidden{display:none!important}
+    button.secondary{background:#e5e7eb;color:#111827}button.danger{background:#b91c1c}.hidden{display:none!important}
     video{width:100%;background:#111827;border-radius:16px;max-height:62vh;object-fit:contain}
     .status{display:inline-block;padding:7px 10px;border-radius:999px;background:#e5e7eb;font-weight:700;font-size:14px}
     .live{background:#fee2e2;color:#991b1b}.ok{background:#dcfce7;color:#166534}.warn{background:#fef3c7;color:#92400e}
     .notice{font-size:14px;background:#eff6ff;padding:12px;border-radius:12px}.qrWrap{text-align:center;margin:18px 0}
     #qr{display:inline-block;background:white;padding:14px;border-radius:14px}.big{font-size:20px;font-weight:750}.center{text-align:center}
-    .small{font-size:13px}.spinner{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    .spinner{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
@@ -37,6 +37,7 @@
     <div class="notice">Zet deze iPad zichtbaar achter in de klas. De microfoon wordt niet aangevraagd.</div>
     <video id="localVideo" autoplay playsinline muted></video>
     <button id="startCamera">Start camera en maak QR</button>
+    <p id="cameraNetwork" class="muted small"></p>
     <div id="pairArea" class="hidden">
       <div class="qrWrap"><div id="qr"></div></div>
       <p class="big center">Scan deze QR met de andere iPad</p>
@@ -49,41 +50,45 @@
     <span id="viewerStatus" class="status">Niet verbonden</span>
     <h2>Kijk-iPad</h2>
     <p id="viewerInfo" class="muted">Scan de QR op de camera-iPad met de Camera-app van deze iPad.</p>
+    <p id="viewerNetwork" class="muted small"></p>
     <video id="remoteVideo" autoplay playsinline></video>
     <button id="stopViewer" class="danger hidden">Stop kijken</button>
   </section>
 
-  <section id="setupPanel" class="card hidden">
-    <span class="status warn">Eenmalige installatie nodig</span>
-    <h2>QR-koppeling is voorbereid</h2>
-    <p>De website is klaar voor automatisch koppelen, maar de eigen signalingservice heeft nog geen webadres.</p>
-    <p class="muted small">Zodra die service is gedeployed, hoeft in <code>signal-config.js</code> alleen het adres te worden ingevuld. Er worden geen videobeelden naar die service gestuurd.</p>
-  </section>
-
   <section class="card">
     <strong>Privacy</strong>
-    <p class="muted">Geen microfoon, analytics, accounts of video-opslag. De QR bevat een willekeurige tijdelijke sessiesleutel in het URL-fragment; dat fragment wordt niet naar GitHub Pages gestuurd. Per sessie is maximaal één kijker toegestaan.</p>
+    <p class="muted">Geen microfoon, analytics, accounts of video-opslag. De QR bevat een willekeurige tijdelijke sessiesleutel in het URL-fragment. Per sessie is maximaal één kijker toegestaan. TURN wordt alleen als netwerkfallback gebruikt; de tijdelijke TURN-gegevens verlopen automatisch.</p>
   </section>
 </main>
 <script src="signal-config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" referrerpolicy="no-referrer"></script>
 <script>
-let pc=null, localStream=null, ws=null, role=null;
-let pendingIce=[];
+let pc=null,localStream=null,ws=null,role=null,pendingIce=[];
 const $=id=>document.getElementById(id);
 const SIGNAL_URL=(window.POPPENKAST_SIGNAL_URL||'').replace(/\/$/,'');
-const rtcConfig={iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]};
+const STUN_ONLY=[{urls:'stun:stun.cloudflare.com:3478'}];
 
 function randB64(bytes){const a=new Uint8Array(bytes);crypto.getRandomValues(a);return btoa(String.fromCharCode(...a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-function parseHash(){const p=new URLSearchParams(location.hash.slice(1));return {session:p.get('join'),key:p.get('key')};}
+function parseHash(){const p=new URLSearchParams(location.hash.slice(1));return{session:p.get('join'),key:p.get('key')};}
 function show(id){['home','cameraPanel','viewerPanel'].forEach(x=>$(x).classList.add('hidden'));$(id).classList.remove('hidden');}
-function setupMissing(){ $('setupPanel').classList.remove('hidden'); }
 function wsBase(){return SIGNAL_URL.replace(/^https:/,'wss:').replace(/^http:/,'ws:');}
+function send(obj){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj));}
 
-function makePC(which){
+async function getIceServers(session,key){
+  if(!SIGNAL_URL) return {iceServers:STUN_ONLY,turn:false};
+  try{
+    const r=await fetch(`${SIGNAL_URL}/turn`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session,key}),cache:'no-store'});
+    if(!r.ok) throw new Error(`TURN ${r.status}`);
+    const data=await r.json();
+    if(!Array.isArray(data.iceServers)||!data.iceServers.length) throw new Error('Geen TURN servers');
+    return {iceServers:data.iceServers,turn:data.iceServers.some(s=>String(Array.isArray(s.urls)?s.urls.join(' '):s.urls).startsWith('turn'))||data.iceServers.some(s=>String(Array.isArray(s.urls)?s.urls.join(' '):s.urls).includes('turn'))};
+  }catch(e){console.warn('TURN fallback niet beschikbaar',e);return{iceServers:STUN_ONLY,turn:false};}
+}
+
+function makePC(which,iceServers){
   pendingIce=[];
-  const p=new RTCPeerConnection(rtcConfig);
-  p.onicecandidate=e=>{if(e.candidate&&ws?.readyState===WebSocket.OPEN) send({type:'ice',candidate:e.candidate});};
+  const p=new RTCPeerConnection({iceServers});
+  p.onicecandidate=e=>{if(e.candidate&&ws?.readyState===WebSocket.OPEN)send({type:'ice',candidate:e.candidate});};
   p.onconnectionstatechange=()=>{
     const s=p.connectionState;
     if(which==='camera'){
@@ -100,50 +105,36 @@ function makePC(which){
   };
   return p;
 }
-function send(obj){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj));}
 
 async function addRemoteIce(candidate){
   if(!pc)return;
-  if(pc.remoteDescription&&pc.remoteDescription.type){
-    try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}
-  }else{
-    pendingIce.push(candidate);
-  }
+  if(pc.remoteDescription?.type){try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}}
+  else pendingIce.push(candidate);
 }
-
 async function flushRemoteIce(){
-  if(!pc||!pc.remoteDescription||!pc.remoteDescription.type)return;
+  if(!pc||!pc.remoteDescription?.type)return;
   const queue=pendingIce.splice(0);
-  for(const candidate of queue){
-    try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}
-  }
+  for(const candidate of queue){try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}}
 }
 
 function openSignal(session,key,which){
   return new Promise((resolve,reject)=>{
-    if(!SIGNAL_URL){setupMissing();reject(new Error('Signalingservice nog niet gekoppeld'));return;}
+    if(!SIGNAL_URL){reject(new Error('Signalingservice niet ingesteld'));return;}
+    let settled=false;
     ws=new WebSocket(`${wsBase()}/ws/${encodeURIComponent(session)}?role=${which}`);
-    ws.onopen=()=>{send({type:'hello',key});resolve();};
-    ws.onerror=()=>reject(new Error('Signalingservice niet bereikbaar'));
+    ws.onopen=()=>send({type:'hello',key});
+    ws.onerror=()=>{if(!settled){settled=true;reject(new Error('Signalingservice niet bereikbaar'));}};
     ws.onmessage=async ev=>{
       let m;try{m=JSON.parse(ev.data);}catch{return;}
-      if(m.type==='error'){alert(m.message||'Koppelen mislukt');return;}
+      if(m.type==='ready'&&!settled){settled=true;resolve();return;}
+      if(m.type==='error'){if(!settled){settled=true;reject(new Error(m.message||'Koppelen mislukt'));}return;}
       if(which==='camera'&&m.type==='viewer-ready'){
-        const offer=await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        send({type:'offer',sdp:pc.localDescription});
+        const offer=await pc.createOffer();await pc.setLocalDescription(offer);send({type:'offer',sdp:pc.localDescription});
       }else if(which==='camera'&&m.type==='answer'){
-        await pc.setRemoteDescription(m.sdp);
-        await flushRemoteIce();
+        await pc.setRemoteDescription(m.sdp);await flushRemoteIce();
       }else if(which==='viewer'&&m.type==='offer'){
-        await pc.setRemoteDescription(m.sdp);
-        await flushRemoteIce();
-        const answer=await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        send({type:'answer',sdp:pc.localDescription});
-      }else if(m.type==='ice'&&m.candidate){
-        await addRemoteIce(m.candidate);
-      }
+        await pc.setRemoteDescription(m.sdp);await flushRemoteIce();const answer=await pc.createAnswer();await pc.setLocalDescription(answer);send({type:'answer',sdp:pc.localDescription});
+      }else if(m.type==='ice'&&m.candidate){await addRemoteIce(m.candidate);}
     };
   });
 }
@@ -155,20 +146,26 @@ $('startCamera').onclick=async()=>{
   try{
     localStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:960},height:{ideal:540},frameRate:{ideal:12,max:15}},audio:false});
     $('localVideo').srcObject=localStream;
-    pc=makePC('camera');localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-    const session=randB64(12), key=randB64(24);
+    const session=randB64(12),key=randB64(24);
+    pc=makePC('camera',STUN_ONLY);localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+    $('cameraStatus').textContent='🔴 Camera actief · beveiligde sessie starten…';$('cameraStatus').className='status live';
+    await openSignal(session,key,'camera');
+    const net=await getIceServers(session,key);
+    pc.setConfiguration({iceServers:net.iceServers});
+    $('cameraNetwork').textContent=net.turn?'✓ TURN-netwerkfallback gereed':'Directe verbinding; TURN nog niet geconfigureerd';
     const joinUrl=`${location.origin}${location.pathname}#join=${session}&key=${key}`;
     $('qr').innerHTML='';new QRCode($('qr'),{text:joinUrl,width:240,height:240,correctLevel:QRCode.CorrectLevel.M});
     $('pairArea').classList.remove('hidden');$('stopCamera').classList.remove('hidden');$('startCamera').classList.add('hidden');
-    $('cameraStatus').textContent='🔴 Camera actief · wachten op koppeling';$('cameraStatus').className='status live';
-    await openSignal(session,key,'camera');
-  }catch(e){if(localStream)stopAll();if(e.name!=='NotAllowedError'&&!String(e.message).includes('Signaling')) alert('Camera kon niet starten: '+e.message);}
+    $('cameraStatus').textContent='🔴 Camera actief · wachten op koppeling';
+  }catch(e){if(localStream)stopAll();alert('Camera kon niet starten: '+e.message);}
 };
 
 async function startViewer(session,key){
   role='viewer';show('viewerPanel');$('viewerInfo').innerHTML='<span class="spinner">↻</span> Verbinden met camera…';
   try{
-    pc=makePC('viewer');pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];};
+    const net=await getIceServers(session,key);
+    $('viewerNetwork').textContent=net.turn?'✓ TURN-netwerkfallback gereed':'Directe verbinding; TURN niet beschikbaar';
+    pc=makePC('viewer',net.iceServers);pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];$('remoteVideo').play().catch(()=>{});};
     await openSignal(session,key,'viewer');
     $('viewerInfo').textContent='Wachten op livebeeld…';$('stopViewer').classList.remove('hidden');
   }catch(e){$('viewerInfo').textContent=e.message;}
@@ -177,8 +174,7 @@ async function startViewer(session,key){
 function stopAll(){
   try{send({type:'bye'});}catch{}
   if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
-  if(pc){pc.close();pc=null;}if(ws){ws.close();ws=null;}
-  pendingIce=[];
+  if(pc){pc.close();pc=null;}if(ws){ws.close();ws=null;}pendingIce=[];
   $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
 }
 $('stopCamera').onclick=()=>{stopAll();location.hash='';location.reload();};
