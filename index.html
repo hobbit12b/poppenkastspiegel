@@ -69,6 +69,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" referrerpolicy="no-referrer"></script>
 <script>
 let pc=null, localStream=null, ws=null, role=null;
+let pendingIce=[];
 const $=id=>document.getElementById(id);
 const SIGNAL_URL=(window.POPPENKAST_SIGNAL_URL||'').replace(/\/$/,'');
 const rtcConfig={iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]};
@@ -80,6 +81,7 @@ function setupMissing(){ $('setupPanel').classList.remove('hidden'); }
 function wsBase(){return SIGNAL_URL.replace(/^https:/,'wss:').replace(/^http:/,'ws:');}
 
 function makePC(which){
+  pendingIce=[];
   const p=new RTCPeerConnection(rtcConfig);
   p.onicecandidate=e=>{if(e.candidate&&ws?.readyState===WebSocket.OPEN) send({type:'ice',candidate:e.candidate});};
   p.onconnectionstatechange=()=>{
@@ -88,14 +90,34 @@ function makePC(which){
       $('cameraStatus').textContent=s==='connected'?'🔴 LIVE verbonden':'🔴 Camera actief · '+s;
       $('cameraStatus').className='status live';
       if(s==='connected'){$('pairState').textContent='✓ Kijk-iPad verbonden';$('qr').classList.add('hidden');}
+      if(s==='failed')$('pairState').textContent='Verbinding mislukt. Stop en maak een nieuwe QR.';
     }else{
       $('viewerStatus').textContent=s==='connected'?'🟢 Verbonden':'Status: '+s;
       $('viewerStatus').className='status '+(s==='connected'?'ok':'');
+      if(s==='connected')$('viewerInfo').textContent='Livebeeld verbonden';
+      if(s==='failed')$('viewerInfo').textContent='Verbinding mislukt. Scan een nieuwe QR.';
     }
   };
   return p;
 }
 function send(obj){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj));}
+
+async function addRemoteIce(candidate){
+  if(!pc)return;
+  if(pc.remoteDescription&&pc.remoteDescription.type){
+    try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}
+  }else{
+    pendingIce.push(candidate);
+  }
+}
+
+async function flushRemoteIce(){
+  if(!pc||!pc.remoteDescription||!pc.remoteDescription.type)return;
+  const queue=pendingIce.splice(0);
+  for(const candidate of queue){
+    try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}
+  }
+}
 
 function openSignal(session,key,which){
   return new Promise((resolve,reject)=>{
@@ -107,13 +129,20 @@ function openSignal(session,key,which){
       let m;try{m=JSON.parse(ev.data);}catch{return;}
       if(m.type==='error'){alert(m.message||'Koppelen mislukt');return;}
       if(which==='camera'&&m.type==='viewer-ready'){
-        const offer=await pc.createOffer();await pc.setLocalDescription(offer);send({type:'offer',sdp:pc.localDescription});
+        const offer=await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        send({type:'offer',sdp:pc.localDescription});
       }else if(which==='camera'&&m.type==='answer'){
         await pc.setRemoteDescription(m.sdp);
+        await flushRemoteIce();
       }else if(which==='viewer'&&m.type==='offer'){
-        await pc.setRemoteDescription(m.sdp);const answer=await pc.createAnswer();await pc.setLocalDescription(answer);send({type:'answer',sdp:pc.localDescription});
+        await pc.setRemoteDescription(m.sdp);
+        await flushRemoteIce();
+        const answer=await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        send({type:'answer',sdp:pc.localDescription});
       }else if(m.type==='ice'&&m.candidate){
-        try{await pc.addIceCandidate(m.candidate);}catch(e){console.warn(e);}
+        await addRemoteIce(m.candidate);
       }
     };
   });
@@ -149,6 +178,7 @@ function stopAll(){
   try{send({type:'bye'});}catch{}
   if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
   if(pc){pc.close();pc=null;}if(ws){ws.close();ws=null;}
+  pendingIce=[];
   $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
 }
 $('stopCamera').onclick=()=>{stopAll();location.hash='';location.reload();};
