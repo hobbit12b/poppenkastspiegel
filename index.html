@@ -18,8 +18,8 @@
     .notice{font-size:14px;background:#eff6ff;padding:12px;border-radius:12px}.qrWrap{text-align:center;margin:18px 0}
     #qr{display:inline-block;background:white;padding:14px;border-radius:14px}.big{font-size:20px;font-weight:750}.center{text-align:center}
     .small{font-size:13px}.spinner{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-    .scannerWrap{position:relative;overflow:hidden;border-radius:16px;background:#111827;margin:12px 0}
-    #scanVideo{display:block;width:100%;max-height:55vh;object-fit:cover;border-radius:0}
+    .scannerWrap{position:relative;overflow:hidden;border-radius:16px;background:#111827;margin:12px 0;min-height:220px}
+    #scanVideo{display:block;width:100%;min-height:220px;max-height:55vh;object-fit:cover;border-radius:0}
     .scanFrame{position:absolute;left:50%;top:50%;width:min(64vw,300px);aspect-ratio:1;transform:translate(-50%,-50%);border:4px solid white;border-radius:20px;box-shadow:0 0 0 999px rgba(0,0,0,.28);pointer-events:none}
   </style>
 </head>
@@ -52,7 +52,7 @@
     <span id="viewerStatus" class="status">Niet verbonden</span>
     <h2>Kijk-iPad</h2>
     <div id="scannerArea" class="hidden">
-      <p id="scannerInfo" class="muted">Richt de camera op de QR-code van de camera-iPad.</p>
+      <p id="scannerInfo" class="muted">Camera starten…</p>
       <div class="scannerWrap">
         <video id="scanVideo" autoplay playsinline muted></video>
         <div class="scanFrame"></div>
@@ -74,7 +74,6 @@
 </main>
 <script src="signal-config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" referrerpolicy="no-referrer"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js" referrerpolicy="no-referrer"></script>
 <script>
 let pc=null, localStream=null, ws=null, role=null;
 let pendingIce=[];
@@ -83,6 +82,9 @@ let remoteStream=null;
 let scanStream=null;
 let scanFrameId=null;
 let scanBusy=false;
+let scanDetecting=false;
+let nativeQrDetector=null;
+let scannerMode=null;
 const $=id=>document.getElementById(id);
 const SIGNAL_URL=(window.POPPENKAST_SIGNAL_URL||'').replace(/\/$/,'');
 const rtcConfig={iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]};
@@ -100,9 +102,8 @@ async function ensureRemoteVideoPlaying(){
 
 function attachRemoteTrack(event){
   const video=$('remoteVideo');
-  if(event.streams&&event.streams[0]){
-    remoteStream=event.streams[0];
-  }else{
+  if(event.streams&&event.streams[0]) remoteStream=event.streams[0];
+  else{
     if(!remoteStream)remoteStream=new MediaStream();
     if(!remoteStream.getTracks().some(t=>t.id===event.track.id))remoteStream.addTrack(event.track);
   }
@@ -112,10 +113,7 @@ function attachRemoteTrack(event){
   ensureRemoteVideoPlaying();
   setTimeout(()=>{
     if(!endingSession&&video.srcObject&&video.readyState<2){
-      const stream=video.srcObject;
-      video.srcObject=null;
-      video.srcObject=stream;
-      ensureRemoteVideoPlaying();
+      const stream=video.srcObject;video.srcObject=null;video.srcObject=stream;ensureRemoteVideoPlaying();
     }
   },1200);
 }
@@ -123,7 +121,7 @@ function attachRemoteTrack(event){
 function makePC(which){
   pendingIce=[];
   const p=new RTCPeerConnection(rtcConfig);
-  p.onicecandidate=e=>{if(e.candidate&&ws?.readyState===WebSocket.OPEN) send({type:'ice',candidate:e.candidate});};
+  p.onicecandidate=e=>{if(e.candidate&&ws?.readyState===WebSocket.OPEN)send({type:'ice',candidate:e.candidate});};
   p.onconnectionstatechange=()=>{
     const s=p.connectionState;
     if(which==='camera'){
@@ -138,10 +136,7 @@ function makePC(which){
     }else{
       $('viewerStatus').textContent=s==='connected'?'🟢 Verbonden':'Status: '+s;
       $('viewerStatus').className='status '+(s==='connected'?'ok':'');
-      if(s==='connected'){
-        $('viewerInfo').textContent='Livebeeld verbonden';
-        ensureRemoteVideoPlaying();
-      }
+      if(s==='connected'){$('viewerInfo').textContent='Livebeeld verbonden';ensureRemoteVideoPlaying();}
       if(s==='failed')$('viewerInfo').textContent='Verbinding mislukt. Maak een nieuwe QR.';
     }
   };
@@ -151,11 +146,9 @@ function send(obj){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj
 
 async function addRemoteIce(candidate){
   if(!pc)return;
-  if(pc.remoteDescription&&pc.remoteDescription.type){
-    try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}
-  }else pendingIce.push(candidate);
+  if(pc.remoteDescription&&pc.remoteDescription.type){try{await pc.addIceCandidate(candidate);}catch(e){console.warn('ICE kandidaat geweigerd',e);}}
+  else pendingIce.push(candidate);
 }
-
 async function flushRemoteIce(){
   if(!pc||!pc.remoteDescription||!pc.remoteDescription.type)return;
   const queue=pendingIce.splice(0);
@@ -166,7 +159,7 @@ function stopScanner(){
   if(scanFrameId){cancelAnimationFrame(scanFrameId);scanFrameId=null;}
   if(scanStream){scanStream.getTracks().forEach(t=>t.stop());scanStream=null;}
   $('scanVideo').srcObject=null;
-  scanBusy=false;
+  scanBusy=false;scanDetecting=false;nativeQrDetector=null;scannerMode=null;
 }
 
 function validScannedJoin(text){
@@ -180,53 +173,133 @@ function validScannedJoin(text){
   }catch{return null;}
 }
 
-function scanLoop(){
-  if(!scanStream||scanBusy)return;
-  const video=$('scanVideo');
-  if(video.readyState>=2&&video.videoWidth&&video.videoHeight&&typeof jsQR==='function'){
-    const canvas=$('scanCanvas');
-    const maxWidth=640;
-    const scale=Math.min(1,maxWidth/video.videoWidth);
-    canvas.width=Math.max(1,Math.round(video.videoWidth*scale));
-    canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
-    const ctx=canvas.getContext('2d',{willReadFrequently:true});
-    ctx.drawImage(video,0,0,canvas.width,canvas.height);
-    const image=ctx.getImageData(0,0,canvas.width,canvas.height);
-    const code=jsQR(image.data,image.width,image.height,{inversionAttempts:'dontInvert'});
-    if(code&&code.data){
-      const join=validScannedJoin(code.data);
-      if(join){
-        scanBusy=true;
-        stopScanner();
-        history.replaceState(null,'',location.pathname+location.search);
-        startViewer(join.session,join.key);
-        return;
+function loadScript(url,timeoutMs=4500){
+  return new Promise((resolve,reject)=>{
+    const script=document.createElement('script');
+    const timer=setTimeout(()=>{script.remove();reject(new Error('timeout'));},timeoutMs);
+    script.src=url;script.async=true;script.referrerPolicy='no-referrer';
+    script.onload=()=>{clearTimeout(timer);resolve();};
+    script.onerror=()=>{clearTimeout(timer);script.remove();reject(new Error('load error'));};
+    document.head.appendChild(script);
+  });
+}
+
+async function prepareQrDetector(){
+  if('BarcodeDetector' in window){
+    try{
+      let supported=['qr_code'];
+      if(typeof BarcodeDetector.getSupportedFormats==='function')supported=await BarcodeDetector.getSupportedFormats();
+      if(supported.includes('qr_code')){
+        nativeQrDetector=new BarcodeDetector({formats:['qr_code']});
+        scannerMode='native';
+        return true;
       }
-      $('scannerInfo').textContent='Dit is geen geldige Poppenkastspiegel-QR.';
-    }
+    }catch(e){console.warn('Native QR-detectie niet beschikbaar',e);}
   }
-  scanFrameId=requestAnimationFrame(scanLoop);
+  if(typeof window.jsQR==='function'){scannerMode='jsqr';return true;}
+  const sources=[
+    'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js',
+    'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+    'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'
+  ];
+  for(const src of sources){
+    try{
+      await loadScript(src);
+      if(typeof window.jsQR==='function'){scannerMode='jsqr';return true;}
+    }catch(e){console.warn('QR-module niet geladen vanaf',src);}
+  }
+  return false;
+}
+
+async function openScannerCamera(){
+  if(!navigator.mediaDevices?.getUserMedia)throw Object.assign(new Error('Deze browser ondersteunt cameratoegang niet.'),{name:'NotSupportedError'});
+  try{
+    return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+  }catch(firstError){
+    if(firstError.name==='NotAllowedError'||firstError.name==='SecurityError')throw firstError;
+    console.warn('Achtercamera-instelling mislukt, probeer standaardcamera',firstError);
+    return await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+  }
+}
+
+function scannerErrorText(e){
+  const detail=e?.message?` (${e.message})`:'';
+  if(e?.name==='NotAllowedError'||e?.name==='SecurityError')return 'Camera-toegang is geweigerd. Geef deze website toestemming om de camera te gebruiken.';
+  if(e?.name==='NotFoundError')return 'Er is geen bruikbare camera gevonden.';
+  if(e?.name==='NotReadableError'||e?.name==='TrackStartError')return 'De camera kan niet worden geopend. Mogelijk gebruikt een andere app de camera al.';
+  if(e?.name==='OverconstrainedError')return 'De gekozen camera-instelling wordt niet ondersteund.';
+  if(e?.name==='NotSupportedError')return 'Deze browser ondersteunt cameratoegang voor deze website niet.';
+  return 'QR-scanner kon niet starten'+detail+'.';
+}
+
+function acceptScannedText(text){
+  const join=validScannedJoin(text);
+  if(!join){$('scannerInfo').textContent='Dit is geen geldige Poppenkastspiegel-QR.';return false;}
+  scanBusy=true;
+  stopScanner();
+  history.replaceState(null,'',location.pathname+location.search);
+  startViewer(join.session,join.key);
+  return true;
+}
+
+async function scanLoop(){
+  if(!scanStream||scanBusy)return;
+  if(scanDetecting){scanFrameId=requestAnimationFrame(scanLoop);return;}
+  const video=$('scanVideo');
+  if(video.readyState>=2&&video.videoWidth&&video.videoHeight){
+    scanDetecting=true;
+    try{
+      const canvas=$('scanCanvas');
+      const maxWidth=640;
+      const scale=Math.min(1,maxWidth/video.videoWidth);
+      canvas.width=Math.max(1,Math.round(video.videoWidth*scale));
+      canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});
+      ctx.drawImage(video,0,0,canvas.width,canvas.height);
+      let text=null;
+      if(scannerMode==='native'&&nativeQrDetector){
+        const codes=await nativeQrDetector.detect(canvas);
+        if(codes?.length)text=codes[0].rawValue||null;
+      }else if(scannerMode==='jsqr'&&typeof window.jsQR==='function'){
+        const image=ctx.getImageData(0,0,canvas.width,canvas.height);
+        const code=window.jsQR(image.data,image.width,image.height,{inversionAttempts:'attemptBoth'});
+        if(code?.data)text=code.data;
+      }
+      if(text&&acceptScannedText(text))return;
+    }catch(e){console.warn('QR-detectiefout',e);}
+    finally{scanDetecting=false;}
+  }
+  if(scanStream&&!scanBusy)scanFrameId=requestAnimationFrame(scanLoop);
 }
 
 async function startScanner(){
-  endingSession=false;
-  role='viewer';
-  show('viewerPanel');
-  $('liveArea').classList.add('hidden');
-  $('scannerArea').classList.remove('hidden');
-  $('viewerStatus').textContent='QR scannen';
-  $('viewerStatus').className='status';
-  $('scannerInfo').textContent='Richt de camera op de QR-code van de camera-iPad.';
+  endingSession=false;role='viewer';show('viewerPanel');
+  $('liveArea').classList.add('hidden');$('scannerArea').classList.remove('hidden');
+  $('viewerStatus').textContent='QR scannen';$('viewerStatus').className='status';
+  $('scannerInfo').textContent='Camera starten…';
   try{
-    if(typeof jsQR!=='function')throw new Error('QR-scanner kon niet worden geladen');
-    scanStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+    scanStream=await openScannerCamera();
     const video=$('scanVideo');
     video.srcObject=scanStream;
-    await video.play().catch(()=>{});
+    await new Promise(resolve=>{
+      if(video.readyState>=1)return resolve();
+      const done=()=>{video.removeEventListener('loadedmetadata',done);resolve();};
+      video.addEventListener('loadedmetadata',done,{once:true});
+      setTimeout(done,1500);
+    });
+    try{await video.play();}catch(e){console.warn('Scanner-video play',e);}
+    $('scannerInfo').textContent='Richt de camera op de QR-code van de camera-iPad.';
+
+    const detectorReady=await prepareQrDetector();
+    if(!detectorReady){
+      $('scannerInfo').textContent='De camera werkt, maar de QR-module kon niet worden geladen. Controleer de internetverbinding en probeer opnieuw.';
+      return;
+    }
     scanFrameId=requestAnimationFrame(scanLoop);
   }catch(e){
+    console.error('Scanner startfout',e?.name,e?.message,e);
     stopScanner();
-    $('scannerInfo').textContent=e.name==='NotAllowedError'?'Camera-toegang is nodig om de QR te scannen.':'QR-scanner kon niet starten: '+e.message;
+    $('scannerInfo').textContent=scannerErrorText(e);
   }
 }
 
@@ -237,23 +310,18 @@ function cleanup(notifyPeer=false){
   remoteStream=null;
   if(pc){pc.onconnectionstatechange=null;pc.ontrack=null;pc.close();pc=null;}
   if(ws){const socket=ws;ws=null;socket.onclose=null;try{socket.close();}catch{}}
-  pendingIce=[];
-  $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
+  pendingIce=[];$('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
 }
-
 function endSession(notifyPeer=true){
-  if(endingSession)return;
-  endingSession=true;
-  cleanup(notifyPeer);
-  history.replaceState(null,'',location.pathname+location.search);
-  location.reload();
+  if(endingSession)return;endingSession=true;cleanup(notifyPeer);
+  history.replaceState(null,'',location.pathname+location.search);location.reload();
 }
 
 function openSignal(session,key,which){
   return new Promise((resolve,reject)=>{
     if(!SIGNAL_URL){reject(new Error('Signalingservice nog niet gekoppeld'));return;}
     ws=new WebSocket(`${wsBase()}/ws/${encodeURIComponent(session)}?role=${which}`);
-    ws.onopen=()=>{send({type:'hello',key});};
+    ws.onopen=()=>send({type:'hello',key});
     ws.onerror=()=>reject(new Error('Signalingservice niet bereikbaar'));
     ws.onclose=()=>{if(!endingSession)endSession(false);};
     ws.onmessage=async ev=>{
@@ -261,19 +329,13 @@ function openSignal(session,key,which){
       if(m.type==='ready'){resolve();return;}
       if(m.type==='error'){reject(new Error(m.message||'Koppelen mislukt'));return;}
       if(which==='camera'&&m.type==='viewer-ready'){
-        const offer=await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        send({type:'offer',sdp:pc.localDescription});
+        const offer=await pc.createOffer();await pc.setLocalDescription(offer);send({type:'offer',sdp:pc.localDescription});
       }else if(which==='camera'&&m.type==='answer'){
-        await pc.setRemoteDescription(m.sdp);
-        await flushRemoteIce();
+        await pc.setRemoteDescription(m.sdp);await flushRemoteIce();
       }else if(which==='viewer'&&m.type==='offer'){
-        await pc.setRemoteDescription(m.sdp);
-        await flushRemoteIce();
-        const answer=await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        send({type:'answer',sdp:pc.localDescription});
-      }else if(m.type==='ice'&&m.candidate){await addRemoteIce(m.candidate);}
+        await pc.setRemoteDescription(m.sdp);await flushRemoteIce();
+        const answer=await pc.createAnswer();await pc.setLocalDescription(answer);send({type:'answer',sdp:pc.localDescription});
+      }else if(m.type==='ice'&&m.candidate)await addRemoteIce(m.candidate);
     };
   });
 }
@@ -288,7 +350,7 @@ $('startCamera').onclick=async()=>{
     localStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:960},height:{ideal:540},frameRate:{ideal:12,max:15}},audio:false});
     $('localVideo').srcObject=localStream;
     pc=makePC('camera');localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-    const session=randB64(12), key=randB64(24);
+    const session=randB64(12),key=randB64(24);
     await openSignal(session,key,'camera');
     const joinUrl=`${location.origin}${location.pathname}#join=${session}&key=${key}`;
     $('qr').innerHTML='';new QRCode($('qr'),{text:joinUrl,width:240,height:240,correctLevel:QRCode.CorrectLevel.M});
@@ -298,15 +360,11 @@ $('startCamera').onclick=async()=>{
 };
 
 async function startViewer(session,key){
-  endingSession=false;
-  stopScanner();
-  role='viewer';show('viewerPanel');
+  endingSession=false;stopScanner();role='viewer';show('viewerPanel');
   $('scannerArea').classList.add('hidden');$('liveArea').classList.remove('hidden');
   $('viewerInfo').innerHTML='<span class="spinner">↻</span> Verbinden met camera…';
   try{
-    remoteStream=null;
-    pc=makePC('viewer');
-    pc.ontrack=attachRemoteTrack;
+    remoteStream=null;pc=makePC('viewer');pc.ontrack=attachRemoteTrack;
     await openSignal(session,key,'viewer');
     $('viewerInfo').textContent='Wachten op livebeeld…';$('stopViewer').classList.remove('hidden');
   }catch(e){$('viewerInfo').textContent=e.message;}
