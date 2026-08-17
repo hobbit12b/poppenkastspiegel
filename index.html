@@ -63,6 +63,7 @@
 <script>
 let pc=null, localStream=null, ws=null, role=null;
 let pendingIce=[];
+let endingSession=false;
 const $=id=>document.getElementById(id);
 const SIGNAL_URL=(window.POPPENKAST_SIGNAL_URL||'').replace(/\/$/,'');
 const rtcConfig={iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]};
@@ -115,12 +116,30 @@ async function flushRemoteIce(){
   }
 }
 
+function cleanup(notifyPeer=false){
+  if(notifyPeer){try{send({type:'bye'});}catch{}}
+  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+  if(pc){pc.onconnectionstatechange=null;pc.close();pc=null;}
+  if(ws){const socket=ws;ws=null;socket.onclose=null;try{socket.close();}catch{}}
+  pendingIce=[];
+  $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
+}
+
+function endSession(notifyPeer=true){
+  if(endingSession)return;
+  endingSession=true;
+  cleanup(notifyPeer);
+  history.replaceState(null,'',location.pathname+location.search);
+  location.reload();
+}
+
 function openSignal(session,key,which){
   return new Promise((resolve,reject)=>{
     if(!SIGNAL_URL){reject(new Error('Signalingservice nog niet gekoppeld'));return;}
     ws=new WebSocket(`${wsBase()}/ws/${encodeURIComponent(session)}?role=${which}`);
     ws.onopen=()=>{send({type:'hello',key});};
     ws.onerror=()=>reject(new Error('Signalingservice niet bereikbaar'));
+    ws.onclose=()=>{if(!endingSession)endSession(false);};
     ws.onmessage=async ev=>{
       let m;try{m=JSON.parse(ev.data);}catch{return;}
       if(m.type==='ready'){resolve();return;}
@@ -159,7 +178,7 @@ $('startCamera').onclick=async()=>{
     $('qr').innerHTML='';new QRCode($('qr'),{text:joinUrl,width:240,height:240,correctLevel:QRCode.CorrectLevel.M});
     $('pairArea').classList.remove('hidden');$('stopCamera').classList.remove('hidden');$('startCamera').classList.add('hidden');
     $('cameraStatus').textContent='🔴 Camera actief · wachten op koppeling';$('cameraStatus').className='status live';
-  }catch(e){if(localStream)stopAll();if(e.name!=='NotAllowedError') alert('Camera kon niet starten: '+e.message);}
+  }catch(e){cleanup(false);if(e.name!=='NotAllowedError') alert('Camera kon niet starten: '+e.message);}
 };
 
 async function startViewer(session,key){
@@ -171,16 +190,9 @@ async function startViewer(session,key){
   }catch(e){$('viewerInfo').textContent=e.message;}
 }
 
-function stopAll(){
-  try{send({type:'bye'});}catch{}
-  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
-  if(pc){pc.close();pc=null;}if(ws){ws.close();ws=null;}
-  pendingIce=[];
-  $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
-}
-$('stopCamera').onclick=()=>{stopAll();location.hash='';location.reload();};
-$('stopViewer').onclick=()=>{stopAll();location.hash='';location.reload();};
-window.addEventListener('pagehide',stopAll);
+$('stopCamera').onclick=()=>endSession(true);
+$('stopViewer').onclick=()=>endSession(true);
+window.addEventListener('pagehide',()=>{if(!endingSession){endingSession=true;cleanup(true);}});
 
 const h=parseHash();if(h.session&&h.key)startViewer(h.session,h.key);
 </script>
