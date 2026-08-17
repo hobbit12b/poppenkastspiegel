@@ -49,7 +49,7 @@
     <span id="viewerStatus" class="status">Niet verbonden</span>
     <h2>Kijk-iPad</h2>
     <p id="viewerInfo" class="muted">Scan de QR op de camera-iPad met de Camera-app van deze iPad.</p>
-    <video id="remoteVideo" autoplay playsinline></video>
+    <video id="remoteVideo" autoplay playsinline muted></video>
     <button id="stopViewer" class="danger hidden">Stop kijken</button>
   </section>
 
@@ -64,6 +64,7 @@
 let pc=null, localStream=null, ws=null, role=null;
 let pendingIce=[];
 let endingSession=false;
+let remoteStream=null;
 const $=id=>document.getElementById(id);
 const SIGNAL_URL=(window.POPPENKAST_SIGNAL_URL||'').replace(/\/$/,'');
 const rtcConfig={iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]};
@@ -72,6 +73,34 @@ function randB64(bytes){const a=new Uint8Array(bytes);crypto.getRandomValues(a);
 function parseHash(){const p=new URLSearchParams(location.hash.slice(1));return {session:p.get('join'),key:p.get('key')};}
 function show(id){['home','cameraPanel','viewerPanel'].forEach(x=>$(x).classList.add('hidden'));$(id).classList.remove('hidden');}
 function wsBase(){return SIGNAL_URL.replace(/^https:/,'wss:').replace(/^http:/,'ws:');}
+
+async function ensureRemoteVideoPlaying(){
+  const video=$('remoteVideo');
+  if(!video.srcObject)return;
+  try{await video.play();}catch(e){console.warn('Videostart uitgesteld',e);}
+}
+
+function attachRemoteTrack(event){
+  const video=$('remoteVideo');
+  if(event.streams&&event.streams[0]){
+    remoteStream=event.streams[0];
+  }else{
+    if(!remoteStream)remoteStream=new MediaStream();
+    if(!remoteStream.getTracks().some(t=>t.id===event.track.id))remoteStream.addTrack(event.track);
+  }
+  video.srcObject=remoteStream;
+  event.track.onunmute=()=>ensureRemoteVideoPlaying();
+  video.onloadedmetadata=()=>ensureRemoteVideoPlaying();
+  ensureRemoteVideoPlaying();
+  setTimeout(()=>{
+    if(!endingSession&&video.srcObject&&video.readyState<2){
+      const stream=video.srcObject;
+      video.srcObject=null;
+      video.srcObject=stream;
+      ensureRemoteVideoPlaying();
+    }
+  },1200);
+}
 
 function makePC(which){
   pendingIce=[];
@@ -91,7 +120,10 @@ function makePC(which){
     }else{
       $('viewerStatus').textContent=s==='connected'?'🟢 Verbonden':'Status: '+s;
       $('viewerStatus').className='status '+(s==='connected'?'ok':'');
-      if(s==='connected')$('viewerInfo').textContent='Livebeeld verbonden';
+      if(s==='connected'){
+        $('viewerInfo').textContent='Livebeeld verbonden';
+        ensureRemoteVideoPlaying();
+      }
       if(s==='failed')$('viewerInfo').textContent='Verbinding mislukt. Scan een nieuwe QR.';
     }
   };
@@ -119,7 +151,8 @@ async function flushRemoteIce(){
 function cleanup(notifyPeer=false){
   if(notifyPeer){try{send({type:'bye'});}catch{}}
   if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
-  if(pc){pc.onconnectionstatechange=null;pc.close();pc=null;}
+  if(remoteStream){remoteStream=null;}
+  if(pc){pc.onconnectionstatechange=null;pc.ontrack=null;pc.close();pc=null;}
   if(ws){const socket=ws;ws=null;socket.onclose=null;try{socket.close();}catch{}}
   pendingIce=[];
   $('localVideo').srcObject=null;$('remoteVideo').srcObject=null;
@@ -169,6 +202,7 @@ $('viewerRole').onclick=()=>{role='viewer';show('viewerPanel');};
 
 $('startCamera').onclick=async()=>{
   try{
+    endingSession=false;
     localStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:960},height:{ideal:540},frameRate:{ideal:12,max:15}},audio:false});
     $('localVideo').srcObject=localStream;
     pc=makePC('camera');localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
@@ -182,9 +216,12 @@ $('startCamera').onclick=async()=>{
 };
 
 async function startViewer(session,key){
+  endingSession=false;
   role='viewer';show('viewerPanel');$('viewerInfo').innerHTML='<span class="spinner">↻</span> Verbinden met camera…';
   try{
-    pc=makePC('viewer');pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];$('remoteVideo').play().catch(()=>{});};
+    remoteStream=null;
+    pc=makePC('viewer');
+    pc.ontrack=attachRemoteTrack;
     await openSignal(session,key,'viewer');
     $('viewerInfo').textContent='Wachten op livebeeld…';$('stopViewer').classList.remove('hidden');
   }catch(e){$('viewerInfo').textContent=e.message;}
